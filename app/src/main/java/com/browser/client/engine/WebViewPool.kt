@@ -68,10 +68,19 @@ class WebViewPool(
     private val fingerprintManager: SessionFingerprintManager,
     private val networkMonitor: NetworkMonitor
 ) {
+    private data class RuntimeConfigKey(
+        val isIncognito: Boolean,
+        val isDesktopMode: Boolean,
+        val stripWebViewToken: Boolean,
+        val jsSecurityMode: JsSecurityMode,
+        val perDomainUaLock: Boolean
+    )
+
     private val mainHandler = Handler(Looper.getMainLooper())
     private val webViews = mutableMapOf<String, WebView>()
     private val currentPageRootDomains = mutableMapOf<String, String>()
     private val desktopModes = mutableMapOf<String, Boolean>()
+    private val lastRuntimeConfigs = mutableMapOf<String, RuntimeConfigKey>()
     private val cloudflareNetworkDetectedTabs = mutableSetOf<String>()
     private val incognitoTabIds = mutableSetOf<String>()
     private val incognitoVisitedDomains = mutableSetOf<String>()
@@ -90,11 +99,22 @@ class WebViewPool(
         }
         val initialDesktop = isDesktopProvider()
         desktopModes[tabId] = initialDesktop
+        val currentSettings = settingsProvider()
+        val desiredConfig = RuntimeConfigKey(
+            isIncognito = isIncognito,
+            isDesktopMode = initialDesktop,
+            stripWebViewToken = currentSettings.stripWebViewToken,
+            jsSecurityMode = currentSettings.jsSecurityMode,
+            perDomainUaLock = currentSettings.perDomainUaLock
+        )
         webViews[tabId]?.let { existing ->
             if (uiContext != null) {
                 (existing.context as? MutableContextWrapper)?.baseContext = uiContext
             }
-            applyRuntimeSettings(existing, settingsProvider(), isIncognito, initialDesktop)
+            if (lastRuntimeConfigs[tabId] != desiredConfig) {
+                applyRuntimeSettings(existing, currentSettings, isIncognito, initialDesktop)
+                lastRuntimeConfigs[tabId] = desiredConfig
+            }
             return existing
         }
 
@@ -273,7 +293,6 @@ class WebViewPool(
                         view.evaluateJavascript(DESKTOP_VIEWPORT_JS, null)
                     }
                     view.evaluateJavascript(PasskeyManagerBridge.PASSKEY_INTERCEPTOR_JS, null)
-                    applyRuntimeSettings(view, settingsProvider(), isIncognito, desktopNow)
                     callbacks.onPageStarted(tabId, url)
                     callbacks.onNavigationStateChanged(tabId, view.canGoBack(), view.canGoForward())
                     val prepStatus = clearanceEngine.prepareForUrl(
@@ -417,6 +436,7 @@ class WebViewPool(
         }
 
         webViews[tabId] = webView
+        lastRuntimeConfigs[tabId] = desiredConfig
         return webView
     }
 
@@ -446,6 +466,13 @@ class WebViewPool(
         val wv = webViews[tabId] ?: return
         val isIncognito = tabId in incognitoTabIds
         applyRuntimeSettings(wv, settings, isIncognito, enabled)
+        lastRuntimeConfigs[tabId] = RuntimeConfigKey(
+            isIncognito = isIncognito,
+            isDesktopMode = enabled,
+            stripWebViewToken = settings.stripWebViewToken,
+            jsSecurityMode = settings.jsSecurityMode,
+            perDomainUaLock = settings.perDomainUaLock
+        )
     }
 
     fun resolvePasskeyJsCall(tabId: String, callId: String, responseJson: String) {
@@ -493,6 +520,13 @@ class WebViewPool(
             if (rootDomain.isNotBlank()) incognitoVisitedDomains.add(rootDomain)
         }
         applyRuntimeSettings(wv, settings, isIncognito, isDesktopMode)
+        lastRuntimeConfigs[tabId] = RuntimeConfigKey(
+            isIncognito = isIncognito,
+            isDesktopMode = isDesktopMode,
+            stripWebViewToken = settings.stripWebViewToken,
+            jsSecurityMode = settings.jsSecurityMode,
+            perDomainUaLock = settings.perDomainUaLock
+        )
         val status = clearanceEngine.prepareForUrl(wv, url, settings, isDesktopMode, isIncognito)
         val extraHeaders = buildMap {
             if (settings.dataSaverEnabled) put("Save-Data", "on")
@@ -517,50 +551,61 @@ class WebViewPool(
     ) {
         val cm = CookieManager.getInstance()
         cm.setAcceptThirdPartyCookies(webView, !isIncognito)
+        val targetUa = clearanceEngine.resolveTargetUserAgent(
+            url = webView.url,
+            settings = settings,
+            tabDesktopMode = isDesktopMode,
+            isIncognito = isIncognito
+        )
         webView.settings.apply {
-            useWideViewPort = true
-            loadWithOverviewMode = true
-            userAgentString = fingerprintManager.resolveUserAgent(
-                stripWebViewToken = settings.stripWebViewToken,
-                isDesktopMode = isDesktopMode
-            )
+            if (!useWideViewPort) useWideViewPort = true
+            if (!loadWithOverviewMode) loadWithOverviewMode = true
+            if (userAgentString != targetUa) {
+                userAgentString = targetUa
+            }
             if (isIncognito) {
-                javaScriptEnabled = true
-                javaScriptCanOpenWindowsAutomatically = false
-                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                allowContentAccess = false
-                allowFileAccess = false
+                if (!javaScriptEnabled) javaScriptEnabled = true
+                if (javaScriptCanOpenWindowsAutomatically) javaScriptCanOpenWindowsAutomatically = false
+                if (mixedContentMode != WebSettings.MIXED_CONTENT_NEVER_ALLOW) {
+                    mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                }
+                if (allowContentAccess) allowContentAccess = false
+                if (allowFileAccess) allowFileAccess = false
                 @Suppress("DEPRECATION")
-                databaseEnabled = false
+                if (databaseEnabled) databaseEnabled = false
                 @Suppress("DEPRECATION")
-                saveFormData = false
+                if (saveFormData) saveFormData = false
                 @Suppress("DEPRECATION")
                 setGeolocationEnabled(false)
-                cacheMode = WebSettings.LOAD_NO_CACHE
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (cacheMode != WebSettings.LOAD_NO_CACHE) cacheMode = WebSettings.LOAD_NO_CACHE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !safeBrowsingEnabled) {
                     safeBrowsingEnabled = true
                 }
             } else {
                 when (settings.jsSecurityMode) {
                     JsSecurityMode.FAST_BALANCED -> {
-                        javaScriptEnabled = true
-                        javaScriptCanOpenWindowsAutomatically = true
-                        mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-                        allowContentAccess = true
+                        if (!javaScriptEnabled) javaScriptEnabled = true
+                        if (!javaScriptCanOpenWindowsAutomatically) javaScriptCanOpenWindowsAutomatically = true
+                        if (mixedContentMode != WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE) {
+                            mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                        }
+                        if (!allowContentAccess) allowContentAccess = true
                     }
                     JsSecurityMode.STRICT_SECURITY -> {
-                        javaScriptEnabled = true
-                        javaScriptCanOpenWindowsAutomatically = false
-                        mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
-                        allowContentAccess = false
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        if (!javaScriptEnabled) javaScriptEnabled = true
+                        if (javaScriptCanOpenWindowsAutomatically) javaScriptCanOpenWindowsAutomatically = false
+                        if (mixedContentMode != WebSettings.MIXED_CONTENT_NEVER_ALLOW) {
+                            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                        }
+                        if (allowContentAccess) allowContentAccess = false
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !safeBrowsingEnabled) {
                             safeBrowsingEnabled = true
                         }
                     }
                 }
                 @Suppress("DEPRECATION")
-                databaseEnabled = true
-                cacheMode = WebSettings.LOAD_DEFAULT
+                if (!databaseEnabled) databaseEnabled = true
+                if (cacheMode != WebSettings.LOAD_DEFAULT) cacheMode = WebSettings.LOAD_DEFAULT
             }
         }
     }
@@ -570,6 +615,7 @@ class WebViewPool(
         cloudflareNetworkDetectedTabs.remove(tabId)
         currentPageRootDomains.remove(tabId)
         desktopModes.remove(tabId)
+        lastRuntimeConfigs.remove(tabId)
         webViews.remove(tabId)?.apply {
             stopLoading()
             clearHistory()

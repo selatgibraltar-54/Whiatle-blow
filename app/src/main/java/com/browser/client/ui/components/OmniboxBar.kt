@@ -314,11 +314,17 @@ fun OmniboxBar(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .onPreviewKeyEvent { keyEvent ->
-                                        if (keyEvent.type == KeyEventType.KeyUp &&
-                                            (keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter)
-                                        ) {
-                                            submitCurrentInput()
-                                            true
+                                        if (keyEvent.key == Key.Enter || keyEvent.key == Key.NumPadEnter) {
+                                            when (keyEvent.type) {
+                                                KeyEventType.KeyDown -> {
+                                                    if (isEditingAddress) {
+                                                        submitCurrentInput()
+                                                    }
+                                                    true
+                                                }
+                                                KeyEventType.KeyUp -> true
+                                                else -> false
+                                            }
                                         } else {
                                             false
                                         }

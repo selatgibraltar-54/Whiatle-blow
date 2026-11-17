@@ -168,6 +168,35 @@ class BrowserManifestAndFingerprintTest {
         assertEquals(DomainClearanceStatus.NONE, viewModel.uiState.value.activeTab.clearanceStatus)
     }
 
+    @Test
+    fun `resolveTargetUserAgent returns consistent UA across mobile, desktop, and incognito modes`() {
+        val app = ApplicationProvider.getApplicationContext<Application>() as ClearPassApplication
+        val settings = BrowserSettings(stripWebViewToken = true, perDomainUaLock = true)
+
+        val mobileUa = app.container.clearanceEngine.resolveTargetUserAgent(
+            url = "https://example.com",
+            settings = settings,
+            tabDesktopMode = false,
+            isIncognito = false
+        )
+        val desktopUa = app.container.clearanceEngine.resolveTargetUserAgent(
+            url = "https://example.com",
+            settings = settings,
+            tabDesktopMode = true,
+            isIncognito = false
+        )
+        val incognitoMobileUa = app.container.clearanceEngine.resolveTargetUserAgent(
+            url = "https://example.com",
+            settings = settings,
+            tabDesktopMode = false,
+            isIncognito = true
+        )
+
+        assertFalse(mobileUa.contains("; wv"))
+        assertTrue(desktopUa.contains("Windows NT 10.0; Win64; x64"))
+        assertEquals(mobileUa, incognitoMobileUa)
+    }
+
     private fun fakeWebRequest(url: String, isMainFrame: Boolean): WebResourceRequest {
         val parsed = Uri.parse(url)
         return object : WebResourceRequest {

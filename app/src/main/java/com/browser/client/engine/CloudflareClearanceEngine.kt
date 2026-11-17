@@ -60,6 +60,21 @@ class CloudflareClearanceEngine(
 
     fun getProtectedVaultDomains(): Set<String> = vaultCache.keys.toSet()
 
+    fun resolveTargetUserAgent(
+        url: String?,
+        settings: BrowserSettings,
+        tabDesktopMode: Boolean,
+        isIncognito: Boolean = false
+    ): String {
+        if (!isIncognito && !url.isNullOrBlank() && settings.perDomainUaLock) {
+            val saved = getCachedClearance(url)
+            if (saved != null && (saved.isDesktopMode == tabDesktopMode || !tabDesktopMode)) {
+                return saved.lockedUserAgent
+            }
+        }
+        return fingerprintManager.resolveUserAgent(settings.stripWebViewToken, tabDesktopMode)
+    }
+
     /**
      * Prepares WebView before loading a URL:
      * 1. Locks the exact User-Agent if the domain already has a verified clearance.
@@ -81,27 +96,17 @@ class CloudflareClearanceEngine(
         val rootDomain = DomainUtils.extractRootDomain(host)
         if (host.isBlank()) return DomainClearanceStatus.NONE
 
+        val targetUa = resolveTargetUserAgent(url, settings, tabDesktopMode, isIncognito)
+        if (webView.settings.userAgentString != targetUa) {
+            webView.settings.userAgentString = targetUa
+        }
+
         if (isIncognito) {
-            val ua = fingerprintManager.resolveUserAgent(settings.stripWebViewToken, tabDesktopMode)
-            if (webView.settings.userAgentString != ua) {
-                webView.settings.userAgentString = ua
-            }
             return DomainClearanceStatus.NONE
         }
 
         val saved = vaultCache[host] ?: vaultCache[rootDomain]
         if (saved != null) {
-            val targetUa = if (settings.perDomainUaLock && saved.isDesktopMode == tabDesktopMode) {
-                saved.lockedUserAgent
-            } else if (settings.perDomainUaLock && !tabDesktopMode) {
-                saved.lockedUserAgent
-            } else {
-                fingerprintManager.resolveUserAgent(settings.stripWebViewToken, tabDesktopMode)
-            }
-            if (webView.settings.userAgentString != targetUa) {
-                webView.settings.userAgentString = targetUa
-            }
-
             if (settings.autoRehydrateBeforeLoad) {
                 val existingCookies = parseCookies(cookieManager.getCookie(url))
                 val currentClearance = existingCookies["cf_clearance"]
@@ -113,13 +118,8 @@ class CloudflareClearanceEngine(
             }
             scope.launch { repository.markReused(saved.domain) }
             return DomainClearanceStatus.VERIFIED_1X
-        } else {
-            val ua = fingerprintManager.resolveUserAgent(settings.stripWebViewToken, tabDesktopMode)
-            if (webView.settings.userAgentString != ua) {
-                webView.settings.userAgentString = ua
-            }
-            return DomainClearanceStatus.NONE
         }
+        return DomainClearanceStatus.NONE
     }
 
     /**
